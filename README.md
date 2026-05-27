@@ -22,7 +22,15 @@ hal = { git = "https://github.com/Igazine/hal-rust.git" }
 
 ## Example Runner
 
-An example CLI runner is included in `examples/runner`. To run the conformance tests:
+An example CLI runner is included in `examples/runner`. Note that the runner requires the universal conformance suite located in the `hal` submodule.
+
+To fetch submodules after cloning:
+
+```bash
+git submodule update --init --recursive
+```
+
+To run the conformance tests:
 
 ```bash
 cargo run --example runner
