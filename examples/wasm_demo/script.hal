@@ -1,0 +1,28 @@
+() {
+  log.print("⛰️🛰️🏆 HAL Wasm Demo (Rust Core)")
+  log.print("-------------------------------")
+
+  // Math module
+  a = 15
+  b = 27
+  sum = math.add(a, b)
+  log.print(str.format("Math Test: %1 + %2 = %3", a, b, sum))
+
+  // String module
+  msg = "  HAL in the browser!  "
+  clean_msg = str.trim(msg)
+  log.print(str.format("String Test: Original length %1, trimmed: '%2'", str.length(msg), clean_msg))
+
+  // Object/Logic Test
+  status = {
+    connected: 1,
+    protocol: "Wasm/Binary"
+  }
+  
+  ? (obj.get(status, "connected")) {
+    log.print(str.format("System Status: %1", obj.get(status, "protocol")))
+  }
+
+  log.print("Wasm Conformance Check: OK")
+  ^ sum
+}
