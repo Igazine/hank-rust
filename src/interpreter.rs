@@ -103,7 +103,7 @@ impl Interpreter {
             },
             Expr::Assign(name, val_expr, _) => {
                 match self.eval(val_expr, scope) {
-                    EvalResult::Value(v) => { scope.set(name, v); EvalResult::Value(Value::Void) },
+                    EvalResult::Value(v) => { scope.set(name, v.clone()); EvalResult::Value(v) },
                     other => other,
                 }
             },
