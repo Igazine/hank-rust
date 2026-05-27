@@ -6,8 +6,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::cell::RefCell;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub type ReadFileFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type ReadFileFn = Arc<dyn Fn(&str) -> Result<String, String>>;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub type ResolvePathFn = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type ResolvePathFn = Arc<dyn Fn(&str, &str) -> Result<String, String>>;
 
 pub struct Runner {
     path_cache: HashMap<String, String>,

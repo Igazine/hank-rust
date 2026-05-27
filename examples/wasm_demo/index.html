@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>HAL Wasm Demo</title>
+</head>
+<body>
+    <h1>HAL WebAssembly Demo (Rust Core)</h1>
+    <pre id="output"></pre>
+
+    <script type="module">
+        import init, { WasmRunner } from '../pkg/hal.js';
+
+        async function run() {
+            await init();
+
+            const output = document.getElementById('output');
+            const log = (msg) => {
+                output.textContent += msg + '\n';
+                console.log(msg);
+            };
+
+            // 1. Define Host I/O closures for the Wasm module
+            const readFile = (path) => {
+                log(`[Wasm] Reading file: ${path}`);
+                if (path === 'main.hal') return '() { log.print("Hello from HAL Wasm (Rust)!"); math.add(10, 20) }';
+                return '';
+            };
+
+            const resolvePath = (macroPath, base) => {
+                log(`[Wasm] Resolving: ${macroPath} from ${base}`);
+                return macroPath;
+            };
+
+            // 2. Instantiate the Runner
+            const runner = new WasmRunner(readFile, resolvePath);
+            
+            // 3. Register Standard Library (Optional)
+            runner.register_stdlib();
+
+            // 4. Run!
+            try {
+                const result = runner.run('main.hal');
+                log(`[Wasm] Result: ${result}`);
+            } catch (e) {
+                log(`[Wasm] Error: ${e}`);
+            }
+        }
+
+        run();
+    </script>
+</body>
+</html>

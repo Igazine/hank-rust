@@ -4,6 +4,7 @@ pub mod parser;
 pub mod interpreter;
 pub mod runner;
 pub mod stdlib;
+pub mod wasm;
 
 pub use types::*;
 pub use lexer::{Lexer, Token};
