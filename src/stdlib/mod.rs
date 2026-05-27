@@ -12,6 +12,40 @@ extern "C" {
     fn wasm_log(s: &str);
 }
 
+fn val_equals(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Void, Value::Void) => true,
+        (Value::Number(n1), Value::Number(n2)) => n1 == n2,
+        (Value::String(s1), Value::String(s2)) => s1 == s2,
+        (Value::Array(a1), Value::Array(a2)) => {
+            let a1 = a1.borrow();
+            let a2 = a2.borrow();
+            if a1.len() != a2.len() { return false; }
+            for i in 0..a1.len() {
+                if !val_equals(&a1[i], &a2[i]) { return false; }
+            }
+            true
+        },
+        (Value::Object(o1), Value::Object(o2)) => {
+            let o1 = o1.borrow();
+            let o2 = o2.borrow();
+            if o1.len() != o2.len() { return false; }
+            for (k, v1) in o1.iter() {
+                if let Some(v2) = o2.get(k) {
+                    if !val_equals(v1, v2) { return false; }
+                } else {
+                    return false;
+                }
+            }
+            true
+        },
+        (Value::Opaque(ov1), Value::Opaque(ov2)) => {
+            ov1.label == ov2.label && Arc::ptr_eq(ov1, ov2)
+        },
+        _ => false,
+    }
+}
+
 pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     let mut modules = HashMap::new();
 
@@ -111,7 +145,7 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     })));
     math_mod.insert("eq".into(), Value::Task(Arc::new(TaskValue::Native {
         name: "math.eq".into(),
-        func: |args, _| { if let (Some(a), Some(b)) = (args.get(0), args.get(1)) { if val_to_string(a) == val_to_string(b) { Value::Number(1.0) } else { Value::Void } } else { Value::Void } }
+        func: |args, _| { if let (Some(a), Some(b)) = (args.get(0), args.get(1)) { if val_equals(a, b) { Value::Number(1.0) } else { Value::Void } } else { Value::Void } }
     })));
     modules.insert("math".into(), math_mod);
 
@@ -162,6 +196,10 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
             for a in args { if !matches!(a, Value::Void) { return a.clone(); } }
             Value::Void
         }
+    })));
+    logic_mod.insert("eq".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "logic.eq".into(),
+        func: |args, _| { if let (Some(a), Some(b)) = (args.get(0), args.get(1)) { if val_equals(a, b) { Value::Number(1.0) } else { Value::Void } } else { Value::Void } }
     })));
     modules.insert("logic".into(), logic_mod);
 
