@@ -7,7 +7,7 @@ use std::path::Path;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let root = std::env::current_dir().unwrap();
-    let workspace_root = root.join("vendor/hal");
+    let workspace_root = root.join("../../vendor/hal");
 
     if args.len() < 2 {
         run_conformance(&workspace_root);
@@ -202,7 +202,7 @@ fn val_to_string(v: &Value) -> String {
         Value::Void => "null".into(),
         Value::Array(_) => "[Array]".into(),
         Value::Object(_) => "{Object}".into(),
-        Value::Regex(_) => "[Regex]".into(),
+        Value::Opaque(ov) => format!("[Opaque:{}]", ov.label),
         Value::Task(_) => "[Task]".into(),
     }
 }

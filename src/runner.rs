@@ -1,9 +1,8 @@
-use crate::types::{Value, Scope, Expr};
+use crate::types::{Value, Scope, Expr, Arc};
 use crate::lexer::{Lexer, Token};
 use crate::parser::Parser;
 use crate::interpreter::{Interpreter, EvalResult, HALScope};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::cell::RefCell;
 
 #[cfg(not(target_arch = "wasm32"))]

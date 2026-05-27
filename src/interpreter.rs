@@ -1,7 +1,6 @@
-use crate::types::{Expr, Value, TaskValue, ExecutionContext, Scope};
+use crate::types::{Expr, Value, TaskValue, ExecutionContext, Scope, Arc};
 use std::collections::HashMap;
 use std::cell::RefCell;
-use std::sync::Arc;
 
 pub struct Interpreter {
     pub global_scope: Arc<dyn Scope>,
@@ -56,7 +55,6 @@ impl Interpreter {
     }
 
     pub fn run(&mut self, expr: &Expr) -> Value {
-        self.hoist(expr, &self.global_scope);
         match self.eval(expr, &self.global_scope) {
             EvalResult::Value(v) | EvalResult::Return(v) => v,
             EvalResult::Error(e) => { eprintln!("Runtime Error: {}", e); Value::Void }
@@ -64,23 +62,38 @@ impl Interpreter {
     }
 
     fn hoist(&self, expr: &Expr, scope: &Arc<dyn Scope>) {
-        match expr {
-            Expr::Block(stmts, _) => { for stmt in stmts { self.hoist(stmt, scope); } },
-            Expr::Assign(name, val_expr, _) => {
-                if let Expr::FuncDef(..) = &**val_expr {
-                    if let EvalResult::Value(val) = self.eval(val_expr, scope) { scope.set(name, val); }
+        if let Expr::Block(stmts, _) = expr {
+            for stmt in stmts {
+                if let Expr::Assign(name, val_expr, _) = stmt {
+                    if let Expr::FuncDef(..) = &**val_expr {
+                        if let EvalResult::Value(val) = self.eval(val_expr, scope) {
+                            scope.set(name, val);
+                        }
+                    } else if let Expr::Assign(inner_name, inner_val, _) = &**val_expr {
+                        // Handle nested macro assignments
+                        if let Expr::FuncDef(..) = &**inner_val {
+                            if let EvalResult::Value(val) = self.eval(inner_val, scope) {
+                                scope.set(inner_name, val);
+                            }
+                        }
+                    }
                 }
-            },
-            _ => {}
+            }
         }
     }
 
     pub fn eval(&self, expr: &Expr, scope: &Arc<dyn Scope>) -> EvalResult {
         match expr {
             Expr::Block(stmts, _) => {
+                self.hoist(expr, scope);
                 let mut last = Value::Void;
                 for stmt in stmts {
-                    if let Expr::Assign(_, val_expr, _) = stmt { if let Expr::FuncDef(..) = &**val_expr { continue; } }
+                    if let Expr::Assign(_, val_expr, _) = stmt {
+                        if let Expr::FuncDef(..) = &**val_expr { continue; }
+                        if let Expr::Assign(_, inner_val, _) = &**val_expr {
+                            if let Expr::FuncDef(..) = &**inner_val { continue; }
+                        }
+                    }
                     match self.eval(stmt, scope) {
                         EvalResult::Value(v) => last = v,
                         other => return other,
@@ -116,8 +129,9 @@ impl Interpreter {
             },
             Expr::FuncDef(params, body, _) => {
                 EvalResult::Value(Value::Task(Arc::new(TaskValue::User {
+                    name: "anonymous".into(),
                     params: params.clone(),
-                    body: body.clone(),
+                    body: *body.clone(),
                     closure: scope.clone(),
                 })))
             },
@@ -173,10 +187,8 @@ impl Interpreter {
                 match self.eval(condition, scope) {
                     EvalResult::Value(cond_val) => {
                         let res = if self.is_truthy(&cond_val) {
-                            self.hoist(success, scope);
                             self.eval(success, scope)
                         } else if let Some(fb) = fallback {
-                            self.hoist(fb, scope);
                             self.eval(fb, scope)
                         } else { EvalResult::Value(Value::Void) };
 
@@ -187,7 +199,6 @@ impl Interpreter {
                                     parent: Some(scope.clone()),
                                 });
                                 if let Some(var) = catch_var { rescue_scope.set(var, Value::String(err_msg)); }
-                                self.hoist(rescue_block, &rescue_scope);
                                 self.eval(rescue_block, &rescue_scope)
                             } else { EvalResult::Error(err_msg) }
                         } else { res }
@@ -205,7 +216,7 @@ impl Interpreter {
                     let ctx = HALExecutionContext { interp: self, scope: scope.clone() };
                     EvalResult::Value(func(args, &ctx))
                 },
-                TaskValue::User { params, body, closure } => {
+                TaskValue::User { params, body, closure, .. } => {
                     if args.len() > params.len() { return EvalResult::Error("Too many arguments".into()); }
                     let task_scope: Arc<dyn Scope> = Arc::new(HALScope {
                         values: RefCell::new(HashMap::new()),
@@ -223,7 +234,6 @@ impl Interpreter {
                         else { return EvalResult::Error(format!("Missing required argument: {}", p.name)); };
                         task_scope.set(&p.name, val);
                     }
-                    self.hoist(body, &task_scope);
                     match self.eval(body, &task_scope) {
                         EvalResult::Return(v) | EvalResult::Value(v) => EvalResult::Value(v),
                         EvalResult::Error(e) => EvalResult::Error(e),
@@ -239,10 +249,11 @@ impl Interpreter {
 pub struct HALExecutionContext<'a> { pub interp: &'a Interpreter, pub scope: Arc<dyn Scope> }
 
 impl<'a> ExecutionContext for HALExecutionContext<'a> {
-    fn parse(&self, source: &str) -> Result<Box<Expr>, String> {
-        let mut lexer = crate::lexer::Lexer::new(source);
-        let mut parser = crate::parser::Parser::new(lexer.tokenize(), "dynamic".into(), HashMap::new());
-        parser.parse().map(Box::new)
+    fn call(&self, task: &Value, args: Vec<Value>) -> Value {
+        match self.interp.call(task, args, &self.scope) {
+            EvalResult::Value(v) | EvalResult::Return(v) => v,
+            EvalResult::Error(e) => { eprintln!("Dynamic Call Error: {}", e); Value::Void }
+        }
     }
     fn eval(&self, node: &Expr) -> Value {
         match self.interp.eval(node, &self.scope) {
@@ -250,11 +261,5 @@ impl<'a> ExecutionContext for HALExecutionContext<'a> {
             EvalResult::Error(e) => { eprintln!("Dynamic Eval Error: {}", e); Value::Void }
         }
     }
-    fn call(&self, task: &Value, args: Vec<Value>) -> Value {
-        match self.interp.call(task, args, &self.scope) {
-            EvalResult::Value(v) | EvalResult::Return(v) => v,
-            EvalResult::Error(e) => { eprintln!("Dynamic Call Error: {}", e); Value::Void }
-        }
-    }
-    fn scope(&self) -> &dyn Scope { &*self.scope }
+    fn scope(&self) -> &Arc<dyn Scope> { &self.scope }
 }

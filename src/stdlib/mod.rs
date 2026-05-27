@@ -1,5 +1,4 @@
-use crate::types::{Value, TaskValue, Scope};
-use std::sync::Arc;
+use crate::types::{Value, TaskValue, Scope, OpaqueValue, Arc};
 use std::collections::HashMap;
 use std::cell::RefCell;
 
@@ -65,27 +64,6 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     runtime_mod.insert("elapsedTime".into(), Value::Task(Arc::new(TaskValue::Native {
         name: "runtime.elapsedTime".into(),
         func: |_, _| Value::Number(0.0)
-    })));
-    runtime_mod.insert("sleep".into(), Value::Task(Arc::new(TaskValue::Native {
-        name: "runtime.sleep".into(),
-        func: |args, _| {
-            if let Some(Value::Number(ms)) = args.get(0) {
-                std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
-            }
-            Value::Void
-        }
-    })));
-    runtime_mod.insert("loop".into(), Value::Task(Arc::new(TaskValue::Native {
-        name: "runtime.loop".into(),
-        func: |args, ctx| {
-            if let Some(task) = args.get(0) {
-                loop {
-                    let res = ctx.call(task, vec![]);
-                    if !matches!(res, Value::Void) { break; }
-                }
-            }
-            Value::Void
-        }
     })));
     modules.insert("runtime".into(), runtime_mod);
 
@@ -266,8 +244,9 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
         name: "json.stringify".into(),
         func: |args, _| {
             if let Some(v) = args.get(0) {
-                let j = map_hal_to_json(v);
-                if let Ok(s) = serde_json::to_string(&j) { return Value::String(s); }
+                if let Some(j) = map_hal_to_json(v) {
+                    if let Ok(s) = serde_json::to_string(&j) { return Value::String(s); }
+                }
             }
             Value::Void
         }
@@ -285,7 +264,14 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
             let mut final_pattern = pattern.clone();
             if flags.contains('i') { final_pattern = format!("(?i){}", final_pattern); }
             let re = regex_lite::Regex::new(&final_pattern).ok();
-            Value::Regex(Arc::new(crate::types::RegexValue { pattern, flags, engine: re }))
+            if let Some(engine) = re {
+                Value::Opaque(Arc::new(OpaqueValue {
+                    label: "RegExp".into(),
+                    data: Box::new(engine),
+                }))
+            } else {
+                Value::Void
+            }
         }
     })));
     regex_mod.insert("match".into(), Value::Task(Arc::new(TaskValue::Native {
@@ -294,20 +280,14 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
             if args.len() < 2 { return Value::Void; }
             let s = val_to_string(&args[0]);
             match &args[1] {
-                Value::Regex(rv) => if let Some(re) = &rv.engine { if re.is_match(&s) { return Value::Number(1.0); } }
+                Value::Opaque(ov) if ov.label == "RegExp" => {
+                    if let Some(re) = ov.data.downcast_ref::<regex_lite::Regex>() {
+                        if re.is_match(&s) { return Value::Number(1.0); }
+                    }
+                }
                 other => if s.contains(&val_to_string(other)) { return Value::Number(1.0); }
             }
             Value::Void
-        }
-    })));
-    regex_mod.insert("replace".into(), Value::Task(Arc::new(TaskValue::Native {
-        name: "regex.replace".into(),
-        func: |args, _| {
-            if args.len() < 3 { return Value::Void; }
-            let s = val_to_string(&args[0]);
-            let pattern = val_to_string(&args[1]);
-            let repl = val_to_string(&args[2]);
-            Value::String(s.replace(&pattern, &repl))
         }
     })));
     modules.insert("regex".into(), regex_mod);
@@ -322,7 +302,7 @@ fn val_to_string(v: &Value) -> String {
         Value::Void => "null".into(),
         Value::Array(_) => "[Array]".into(),
         Value::Object(_) => "{Object}".into(),
-        Value::Regex(_) => "[Regex]".into(),
+        Value::Opaque(ov) => format!("[Opaque:{}]", ov.label),
         Value::Task(_) => "[Task]".into(),
     }
 }
@@ -342,17 +322,26 @@ fn map_json_to_hal(v: serde_json::Value) -> Value {
     }
 }
 
-fn map_hal_to_json(v: &Value) -> serde_json::Value {
+fn map_hal_to_json(v: &Value) -> Option<serde_json::Value> {
     match v {
-        Value::Void => serde_json::Value::Null,
-        Value::Number(n) => serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap()),
-        Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Array(a) => serde_json::Value::Array(a.borrow().iter().map(map_hal_to_json).collect()),
+        Value::Void => Some(serde_json::Value::Null),
+        Value::Number(n) => Some(serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap())),
+        Value::String(s) => Some(serde_json::Value::String(s.clone())),
+        Value::Array(a) => {
+            let mut items = vec![];
+            for i in a.borrow().iter() {
+                items.push(map_hal_to_json(i)?);
+            }
+            Some(serde_json::Value::Array(items))
+        },
         Value::Object(o) => {
             let mut map = serde_json::Map::new();
-            for (k, val) in o.borrow().iter() { map.insert(k.clone(), map_hal_to_json(val)); }
-            serde_json::Value::Object(map)
+            for (k, val) in o.borrow().iter() {
+                map.insert(k.clone(), map_hal_to_json(val)?);
+            }
+            Some(serde_json::Value::Object(map))
         },
-        _ => serde_json::Value::Null,
+        Value::Opaque(_) => None,
+        _ => Some(serde_json::Value::Null),
     }
 }

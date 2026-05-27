@@ -3,11 +3,9 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Function;
 #[cfg(target_arch = "wasm32")]
-use crate::runner::Runner;
+use crate::runner::{Runner, ReadFileFn, ResolvePathFn};
 #[cfg(target_arch = "wasm32")]
-use crate::types::Value;
-#[cfg(target_arch = "wasm32")]
-use std::sync::Arc;
+use crate::types::{Value, Arc};
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -23,7 +21,7 @@ impl WasmRunner {
         let rf_js = Arc::new(read_file_js);
         let rp_js = Arc::new(resolve_path_js);
 
-        let read_file = Arc::new(move |path: &str| {
+        let read_file: ReadFileFn = Arc::new(move |path: &str| {
             let this = JsValue::NULL;
             let p = JsValue::from_str(path);
             match rf_js.call1(&this, &p) {
@@ -32,7 +30,7 @@ impl WasmRunner {
             }
         });
 
-        let resolve_path = Arc::new(move |m: &str, base: &str| {
+        let resolve_path: ResolvePathFn = Arc::new(move |m: &str, base: &str| {
             let this = JsValue::NULL;
             let m_js = JsValue::from_str(m);
             let base_js = JsValue::from_str(base);
@@ -70,7 +68,7 @@ fn val_to_string(v: &Value) -> String {
         Value::Void => "null".into(),
         Value::Array(_) => "[Array]".into(),
         Value::Object(_) => "{Object}".into(),
-        Value::Regex(_) => "[Regex]".into(),
+        Value::Opaque(ov) => format!("[Opaque:{}]", ov.label),
         Value::Task(_) => "[Task]".into(),
     }
 }

@@ -1,7 +1,21 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::cell::RefCell;
-use regex_lite::Regex;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+pub use std::rc::Rc as Arc;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ValueType {
+    Void,
+    Number,
+    String,
+    Array,
+    Object,
+    Opaque,
+    Task,
+}
 
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -10,28 +24,50 @@ pub enum Value {
     String(String),
     Array(Arc<RefCell<Vec<Value>>>),
     Object(Arc<RefCell<HashMap<String, Value>>>),
-    Regex(Arc<RegexValue>),
+    Opaque(Arc<OpaqueValue>),
     Task(Arc<TaskValue>),
 }
 
-#[derive(Debug)]
-pub struct RegexValue {
-    pub pattern: String,
-    pub flags: String,
-    pub engine: Option<Regex>,
+impl Value {
+    pub fn get_type(&self) -> ValueType {
+        match self {
+            Self::Void => ValueType::Void,
+            Self::Number(_) => ValueType::Number,
+            Self::String(_) => ValueType::String,
+            Self::Array(_) => ValueType::Array,
+            Self::Object(_) => ValueType::Object,
+            Self::Opaque(_) => ValueType::Opaque,
+            Self::Task(_) => ValueType::Task,
+        }
+    }
 }
 
 #[derive(Debug)]
+pub struct OpaqueValue {
+    pub label: String,
+    pub data: Box<dyn std::any::Any + Send + Sync>,
+}
+
 pub enum TaskValue {
     Native {
         name: String,
         func: NativeFunc,
     },
     User {
+        name: String,
         params: Vec<Param>,
-        body: Box<Expr>,
+        body: Expr,
         closure: Arc<dyn Scope>,
     },
+}
+
+impl std::fmt::Debug for TaskValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Native { name, .. } => write!(f, "NativeTask({})", name),
+            Self::User { name, .. } => write!(f, "UserTask({})", name),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -44,10 +80,9 @@ pub struct Param {
 pub type NativeFunc = fn(args: Vec<Value>, ctx: &dyn ExecutionContext) -> Value;
 
 pub trait ExecutionContext {
-    fn parse(&self, source: &str) -> Result<Box<Expr>, String>;
-    fn eval(&self, node: &Expr) -> Value;
     fn call(&self, task: &Value, args: Vec<Value>) -> Value;
-    fn scope(&self) -> &dyn Scope;
+    fn eval(&self, node: &Expr) -> Value;
+    fn scope(&self) -> &Arc<dyn Scope>;
 }
 
 pub trait Scope: std::fmt::Debug {
@@ -56,11 +91,6 @@ pub trait Scope: std::fmt::Debug {
     fn exists(&self, name: &str) -> bool;
 }
 
-pub trait IHALSerializable {
-    fn serialize_hal(&self) -> String;
-}
-
-// AST Nodes
 #[derive(Clone, Debug)]
 pub enum Expr {
     Block(Vec<Expr>, TokenData),
@@ -87,4 +117,8 @@ pub enum Expr {
 pub struct TokenData {
     pub line: usize,
     pub line_text: String,
+}
+
+pub trait IHALSerializable {
+    fn serialize_hal(&self) -> String;
 }
