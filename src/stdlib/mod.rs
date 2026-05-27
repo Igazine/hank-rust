@@ -337,7 +337,7 @@ fn val_to_string(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Number(n) => n.to_string(),
-        Value::Void => "null".into(),
+        Value::Void => "Void".into(),
         Value::Array(_) => "[Array]".into(),
         Value::Object(_) => "{Object}".into(),
         Value::Opaque(ov) => format!("[Opaque:{}]", ov.label),
