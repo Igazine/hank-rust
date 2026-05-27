@@ -2,7 +2,16 @@ use crate::types::{Value, TaskValue, Scope};
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::cell::RefCell;
-use crate::interpreter::{EvalResult};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn wasm_log(s: &str);
+}
 
 pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     let mut modules = HashMap::new();
@@ -12,21 +21,33 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     log_mod.insert("print".into(), Value::Task(Arc::new(TaskValue::Native {
         name: "log.print".into(),
         func: |args, _| {
-            println!("{}", args.iter().map(|a| val_to_string(a)).collect::<Vec<_>>().join(" "));
+            let msg = args.iter().map(|a| val_to_string(a)).collect::<Vec<_>>().join(" ");
+            #[cfg(target_arch = "wasm32")]
+            wasm_log(&msg);
+            #[cfg(not(target_arch = "wasm32"))]
+            println!("{}", msg);
             Value::Void
         }
     })));
     log_mod.insert("error".into(), Value::Task(Arc::new(TaskValue::Native {
         name: "log.error".into(),
         func: |args, _| {
-            eprintln!("{}", args.iter().map(|a| val_to_string(a)).collect::<Vec<_>>().join(" "));
+            let msg = args.iter().map(|a| val_to_string(a)).collect::<Vec<_>>().join(" ");
+            #[cfg(target_arch = "wasm32")]
+            wasm_log(&format!("[ERROR] {}", msg));
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("{}", msg);
             Value::Void
         }
     })));
     log_mod.insert("warn".into(), Value::Task(Arc::new(TaskValue::Native {
         name: "log.warn".into(),
         func: |args, _| {
-            println!("[WARN] {}", args.iter().map(|a| val_to_string(a)).collect::<Vec<_>>().join(" "));
+            let msg = args.iter().map(|a| val_to_string(a)).collect::<Vec<_>>().join(" ");
+            #[cfg(target_arch = "wasm32")]
+            wasm_log(&format!("[WARN] {}", msg));
+            #[cfg(not(target_arch = "wasm32"))]
+            println!("[WARN] {}", msg);
             Value::Void
         }
     })));

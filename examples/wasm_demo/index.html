@@ -25,6 +25,15 @@
                 console.log(msg);
             };
 
+            // Intercept console.log to show HAL log.print calls on the page
+            const originalConsoleLog = console.log;
+            console.log = (...args) => {
+                const msg = args.join(' ');
+                if (output.textContent === 'System initializing...') output.textContent = '';
+                output.textContent += msg + '\n';
+                originalConsoleLog.apply(console, args);
+            };
+
             try {
                 // Initialize the Wasm module
                 await init();
