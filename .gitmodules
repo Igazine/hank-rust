@@ -1,3 +1,4 @@
 [submodule "vendor/hank"]
 	path = vendor/hank
 	url = https://github.com/Igazine/hank.git
+	branch = main
