@@ -12,7 +12,7 @@ extern "C" {
     fn wasm_log(s: &str);
 }
 
-fn val_equals(a: &Value, b: &Value) -> bool {
+fn hank_equals(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Void, Value::Void) => true,
         (Value::Number(n1), Value::Number(n2)) => n1 == n2,
@@ -22,7 +22,7 @@ fn val_equals(a: &Value, b: &Value) -> bool {
             let a2 = a2.borrow();
             if a1.len() != a2.len() { return false; }
             for i in 0..a1.len() {
-                if !val_equals(&a1[i], &a2[i]) { return false; }
+                if !hank_equals(&a1[i], &a2[i]) { return false; }
             }
             true
         },
@@ -32,7 +32,7 @@ fn val_equals(a: &Value, b: &Value) -> bool {
             if o1.len() != o2.len() { return false; }
             for (k, v1) in o1.iter() {
                 if let Some(v2) = o2.get(k) {
-                    if !val_equals(v1, v2) { return false; }
+                    if !hank_equals(v1, v2) { return false; }
                 } else {
                     return false;
                 }
@@ -154,7 +154,7 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     })));
     math_mod.insert("eq".into(), Value::Task(Arc::new(TaskValue::Native {
         name: "math.eq".into(),
-        func: |args, _| { if let (Some(a), Some(b)) = (args.get(0), args.get(1)) { if val_equals(a, b) { Value::Number(1.0) } else { Value::Void } } else { Value::Void } }
+        func: |args, _| { if let (Some(a), Some(b)) = (args.get(0), args.get(1)) { if hank_equals(a, b) { Value::Number(1.0) } else { Value::Void } } else { Value::Void } }
     })));
     modules.insert("math".into(), math_mod);
 
@@ -163,7 +163,7 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     str_mod.insert("length".into(), Value::Task(Arc::new(TaskValue::Native {
         name: "str.length".into(),
         func: |args, _| {
-            if let Some(Value::String(s)) = args.get(0) { return Value::Number(s.len() as f64); }
+            if let Some(Value::String(s)) = args.get(0) { return Value::Number(s.chars().count() as f64); }
             Value::Void
         }
     })));
@@ -188,6 +188,101 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     })));
     modules.insert("str".into(), str_mod);
 
+    // --- num ---
+    let mut num_mod = HashMap::new();
+    num_mod.insert("parse".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "num.parse".into(),
+        func: |args, _| {
+            if args.is_empty() { return Value::Void; }
+            let s = val_to_string(&args[0]);
+            let mut base = if let Some(Value::Number(n)) = args.get(1) { *n as u32 } else { 0 };
+
+            let final_s = if base == 0 {
+                if s.starts_with("0x") { base = 16; &s[2..] }
+                else if s.starts_with("0b") { base = 2; &s[2..] }
+                else if s.starts_with("0o") { base = 8; &s[2..] }
+                else { base = 10; &s }
+            } else { &s };
+
+            if let Ok(n) = i64::from_str_radix(final_s, base) {
+                Value::Number(n as f64)
+            } else if base == 10 || base == 0 {
+                if let Ok(f) = s.parse::<f64>() { Value::Number(f) } else { Value::Void }
+            } else {
+                Value::Void
+            }
+        }
+    })));
+    num_mod.insert("format".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "num.format".into(),
+        func: |args, _| {
+            if let Some(Value::Number(n)) = args.get(0) {
+                let base = if let Some(Value::Number(b)) = args.get(1) { *b as u32 } else { 10 };
+                if base < 2 || base > 36 { return Value::Void; }
+                let val = *n as i64;
+                let chars = "0123456789abcdefghijklmnopqrstuvwxyz";
+                if val == 0 { return Value::String("0".into()); }
+                let mut res = String::new();
+                let mut curr = val.abs();
+                while curr > 0 {
+                    let rem = (curr % (base as i64)) as usize;
+                    res.insert(0, chars.chars().nth(rem).unwrap());
+                    curr /= base as i64;
+                }
+                if val < 0 { res.insert(0, '-'); }
+                Value::String(res)
+            } else { Value::Void }
+        }
+    })));
+    num_mod.insert("bitAnd".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "num.bitAnd".into(),
+        func: |args, _| {
+            let a = if let Some(Value::Number(n)) = args.get(0) { *n as i64 } else { 0 };
+            let b = if let Some(Value::Number(n)) = args.get(1) { *n as i64 } else { 0 };
+            Value::Number((a & b) as f64)
+        }
+    })));
+    num_mod.insert("bitOr".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "num.bitOr".into(),
+        func: |args, _| {
+            let a = if let Some(Value::Number(n)) = args.get(0) { *n as i64 } else { 0 };
+            let b = if let Some(Value::Number(n)) = args.get(1) { *n as i64 } else { 0 };
+            Value::Number((a | b) as f64)
+        }
+    })));
+    num_mod.insert("bitXor".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "num.bitXor".into(),
+        func: |args, _| {
+            let a = if let Some(Value::Number(n)) = args.get(0) { *n as i64 } else { 0 };
+            let b = if let Some(Value::Number(n)) = args.get(1) { *n as i64 } else { 0 };
+            Value::Number((a ^ b) as f64)
+        }
+    })));
+    num_mod.insert("bitNot".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "num.bitNot".into(),
+        func: |args, _| {
+            let a = if let Some(Value::Number(n)) = args.get(0) { *n as i64 } else { 0 };
+            Value::Number((!a) as f64)
+        }
+    })));
+    num_mod.insert("shiftL".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "num.shiftL".into(),
+        func: |args, _| {
+            let a = if let Some(Value::Number(n)) = args.get(0) { *n as i64 } else { 0 };
+            let b = if let Some(Value::Number(n)) = args.get(1) { *n as u32 } else { 0 };
+            Value::Number((a << b) as f64)
+        }
+    })));
+    num_mod.insert("shiftR".into(), Value::Task(Arc::new(TaskValue::Native {
+        name: "num.shiftR".into(),
+        func: |args, _| {
+            let a = if let Some(Value::Number(n)) = args.get(0) { *n as i64 } else { 0 };
+            let b = if let Some(Value::Number(n)) = args.get(1) { *n as u32 } else { 0 };
+            Value::Number((a >> b) as f64)
+        }
+    })));
+    modules.insert("num".into(), num_mod);
+
     // --- logic ---
     let mut logic_mod = HashMap::new();
     logic_mod.insert("and".into(), Value::Task(Arc::new(TaskValue::Native {
@@ -208,7 +303,7 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
     })));
     logic_mod.insert("eq".into(), Value::Task(Arc::new(TaskValue::Native {
         name: "logic.eq".into(),
-        func: |args, _| { if let (Some(a), Some(b)) = (args.get(0), args.get(1)) { if val_equals(a, b) { Value::Number(1.0) } else { Value::Void } } else { Value::Void } }
+        func: |args, _| { if let (Some(a), Some(b)) = (args.get(0), args.get(1)) { if hank_equals(a, b) { Value::Number(1.0) } else { Value::Void } } else { Value::Void } }
     })));
     modules.insert("logic".into(), logic_mod);
 
@@ -262,15 +357,9 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
         name: "obj.keys".into(),
         func: |args, _| {
             if let Some(Value::Object(m)) = args.get(0) {
-                Value::Array(Arc::new(RefCell::new(m.borrow().keys().map(|k| Value::String(k.clone())).collect())))
-            } else { Value::Void }
-        }
-    })));
-    obj_mod.insert("values".into(), Value::Task(Arc::new(TaskValue::Native {
-        name: "obj.values".into(),
-        func: |args, _| {
-            if let Some(Value::Object(m)) = args.get(0) {
-                Value::Array(Arc::new(RefCell::new(m.borrow().values().cloned().collect())))
+                let mut keys: Vec<Value> = m.borrow().keys().map(|k| Value::String(k.clone())).collect();
+                keys.sort_by(|a, b| if let (Value::String(s1), Value::String(s2)) = (a, b) { s1.cmp(s2) } else { std::cmp::Ordering::Equal });
+                Value::Array(Arc::new(RefCell::new(keys)))
             } else { Value::Void }
         }
     })));
@@ -282,7 +371,7 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
         name: "json.parse".into(),
         func: |args, _| {
             if let Some(Value::String(s)) = args.get(0) {
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(s) { return map_json_to_hal(data); }
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(s) { return map_json_to_hank(data); }
             }
             Value::Void
         }
@@ -291,7 +380,7 @@ pub fn get_modules() -> HashMap<String, HashMap<String, Value>> {
         name: "json.stringify".into(),
         func: |args, _| {
             if let Some(v) = args.get(0) {
-                if let Some(j) = map_hal_to_json(v) {
+                if let Some(j) = map_hank_to_json(v) {
                     if let Ok(s) = serde_json::to_string(&j) { return Value::String(s); }
                 }
             }
@@ -354,22 +443,22 @@ fn val_to_string(v: &Value) -> String {
     }
 }
 
-fn map_json_to_hal(v: serde_json::Value) -> Value {
+fn map_json_to_hank(v: serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::Void,
         serde_json::Value::Bool(b) => if b { Value::Number(1.0) } else { Value::Void },
         serde_json::Value::Number(n) => Value::Number(n.as_f64().unwrap_or(0.0)),
         serde_json::Value::String(s) => Value::String(s),
-        serde_json::Value::Array(a) => Value::Array(Arc::new(RefCell::new(a.into_iter().map(map_json_to_hal).collect()))),
+        serde_json::Value::Array(a) => Value::Array(Arc::new(RefCell::new(a.into_iter().map(map_json_to_hank).collect()))),
         serde_json::Value::Object(o) => {
             let mut map = HashMap::new();
-            for (k, val) in o { map.insert(k, map_json_to_hal(val)); }
+            for (k, val) in o { map.insert(k, map_json_to_hank(val)); }
             Value::Object(Arc::new(RefCell::new(map)))
         }
     }
 }
 
-fn map_hal_to_json(v: &Value) -> Option<serde_json::Value> {
+fn map_hank_to_json(v: &Value) -> Option<serde_json::Value> {
     match v {
         Value::Void => Some(serde_json::Value::Null),
         Value::Number(n) => Some(serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap())),
@@ -377,14 +466,14 @@ fn map_hal_to_json(v: &Value) -> Option<serde_json::Value> {
         Value::Array(a) => {
             let mut items = vec![];
             for i in a.borrow().iter() {
-                items.push(map_hal_to_json(i)?);
+                items.push(map_hank_to_json(i)?);
             }
             Some(serde_json::Value::Array(items))
         },
         Value::Object(o) => {
             let mut map = serde_json::Map::new();
             for (k, val) in o.borrow().iter() {
-                map.insert(k.clone(), map_hal_to_json(val)?);
+                map.insert(k.clone(), map_hank_to_json(val)?);
             }
             Some(serde_json::Value::Object(map))
         },

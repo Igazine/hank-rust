@@ -91,6 +91,15 @@ pub trait Scope: std::fmt::Debug {
     fn exists(&self, name: &str) -> bool;
 }
 
+pub trait Resource {
+    fn id(&self) -> &str;
+    fn content(&self) -> Option<String>;
+    fn ast(&self) -> Option<Expr>;
+    fn set_ast(&self, ast: Expr);
+    fn load(&self) -> Result<(), String>;
+    fn resolve(&self, id: &str) -> Result<Box<dyn Resource>, String>;
+}
+
 #[derive(Clone, Debug)]
 pub enum Expr {
     Block(Vec<Expr>, TokenData),

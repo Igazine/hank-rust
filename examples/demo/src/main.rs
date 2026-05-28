@@ -1,238 +1,284 @@
-use hal::{Value, Runner};
+use hank::types::{Value, ValueType, Expr, Resource, Arc};
+use hank::runner::Runner;
+use hank::stdlib;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::cell::RefCell;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+struct FileResource {
+    id: String,
+    content: RefCell<Option<String>>,
+    ast: RefCell<Option<Expr>>,
+}
+
+impl FileResource {
+    fn new(path: String) -> Self {
+        Self {
+            id: path,
+            content: RefCell::new(None),
+            ast: RefCell::new(None),
+        }
+    }
+}
+
+impl Resource for FileResource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn content(&self) -> Option<String> {
+        self.content.borrow().clone()
+    }
+
+    fn ast(&self) -> Option<Expr> {
+        self.ast.borrow().clone()
+    }
+
+    fn set_ast(&self, ast: Expr) {
+        *self.ast.borrow_mut() = Some(ast);
+    }
+
+    fn load(&self) -> Result<(), String> {
+        if self.content.borrow().is_some() { return Ok(()); }
+        let s = fs::read_to_string(&self.id).map_err(|e| e.to_string())?;
+        *self.content.borrow_mut() = Some(s);
+        Ok(())
+    }
+
+    fn resolve(&self, id: &str) -> Result<Box<dyn Resource>, String> {
+        let mut path = PathBuf::from(id);
+        if !path.is_absolute() {
+            let base_dir = Path::new(&self.id).parent().unwrap_or(Path::new("."));
+            path = base_dir.join(id);
+        }
+
+        if path.extension().is_none() {
+            let hank_path = path.with_extension("hank");
+            if hank_path.exists() {
+                path = hank_path;
+            }
+        }
+
+        let abs_path = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        Ok(Box::new(FileResource::new(abs_path.to_string_lossy().to_string())))
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let root = std::env::current_dir().unwrap();
-    let workspace_root = root.join("../../vendor/hal");
+    let current_dir = std::env::current_dir().unwrap();
+    
+    // Submodule is at vendor/hank relative to the hank-rust root
+    let mut root = current_dir.join("vendor/hank");
+    if !root.exists() {
+        root = current_dir.join("../../vendor/hank");
+    }
 
     if args.len() < 2 {
-        run_conformance(&workspace_root);
+        run_conformance(&root);
         return;
     }
 
-    let mut runner = create_runner();
-    
-    let hal_args: Vec<Value> = args[2..].iter().map(|a| Value::String(a.clone())).collect();
-    match runner.run(&args[1], hal_args) {
+    let runner = create_runner();
+    let script_path = Path::new(&args[1]);
+    let abs_path = fs::canonicalize(script_path).unwrap();
+    let res = Arc::new(FileResource::new(abs_path.to_string_lossy().to_string()));
+
+    let mut hank_args = vec![];
+    for arg in &args[2..] {
+        hank_args.push(Value::String(arg.clone()));
+    }
+
+    match runner.run(res, hank_args) {
         Ok(val) => {
-            if let Value::Number(n) = val { std::process::exit(n as i32); }
-            std::process::exit(0);
+            if let Value::Number(n) = val {
+                std::process::exit(n as i32);
+            }
         },
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     }
 }
 
 fn create_runner() -> Runner {
-    // 1. Instantiate the core Runner with OS-specific I/O closures
-    let read_file = Arc::new(|path: &str| {
-        std::fs::read_to_string(path).map_err(|e| e.to_string())
-    });
+    let runner = Runner::new();
 
-    let resolve_path = Arc::new(|m: &str, base_file: &str| {
-        let p = Path::new(m);
-        if p.is_absolute() { 
-            return p.canonicalize()
-                .map(|cp| cp.to_string_lossy().to_string())
-                .map_err(|e| format!("Failed to canonicalize {}: {}", m, e));
-        }
-
-        let base_dir = if base_file.is_empty() {
-            std::env::current_dir().unwrap()
-        } else {
-            Path::new(base_file).parent().unwrap().to_path_buf()
-        };
-
-        let joined = base_dir.join(m);
-        let mut final_path = joined.clone();
-        if joined.extension().is_none() {
-            let with_hal = joined.with_extension("hal");
-            if with_hal.exists() { final_path = with_hal; }
-        }
-
-        final_path.canonicalize()
-            .map(|p| p.to_string_lossy().to_string())
-            .map_err(|e| format!("Failed to resolve {}: {}", m, e))
-    });
-
-    let mut runner = Runner::new(read_file, resolve_path);
-
-    // 2. Register the Standard Library manually (Optional)
-    let std_modules = hal::stdlib::get_modules();
-    for (name, tasks) in std_modules {
+    // 1. Register Standard Library
+    let std = stdlib::get_modules();
+    for (name, tasks) in std {
         runner.register_module(&name, tasks);
     }
 
-    // 3. Register Custom SYSLIB
-    register_syslib(&mut runner);
+    // 2. Register Example SYSLIB
+    register_syslib(&runner);
 
     runner
 }
 
-fn register_syslib(runner: &mut Runner) {
+fn register_syslib(runner: &Runner) {
     let mut os_mod = HashMap::new();
-    os_mod.insert("type".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    os_mod.insert("type".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "os.type".into(),
-        func: |_, _| Value::String(std::env::consts::OS.into())
+        func: |_, _| {
+            let s = std::env::consts::OS;
+            if s.contains("macos") || s.contains("darwin") { Value::String("darwin".into()) }
+            else if s.contains("windows") { Value::String("windows".into()) }
+            else if s.contains("linux") { Value::String("linux".into()) }
+            else { Value::String(s.into()) }
+        },
     })));
-    os_mod.insert("memory".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    os_mod.insert("name".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
+        name: "os.name".into(),
+        func: |_, _| Value::String(std::env::consts::OS.into()),
+    })));
+    os_mod.insert("arch".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
+        name: "os.arch".into(),
+        func: |_, _| Value::String(std::env::consts::ARCH.into()),
+    })));
+    os_mod.insert("memory".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "os.memory".into(),
         func: |_, _| {
             let mut map = HashMap::new();
-            map.insert("total".into(), Value::Number(1024.0));
-            map.insert("free".into(), Value::Number(512.0));
+            map.insert("total".into(), Value::Number(0.0));
+            map.insert("free".into(), Value::Number(0.0));
+            map.insert("used".into(), Value::Number(0.0));
             Value::Object(Arc::new(RefCell::new(map)))
-        }
+        },
     })));
-    os_mod.insert("cpu".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    os_mod.insert("cpu".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "os.cpu".into(),
-        func: |_, _| Value::Number(0.0)
+        func: |_, _| Value::Number(0.0),
     })));
     runner.register_module("os", os_mod);
 
     let mut host_mod = HashMap::new();
-    host_mod.insert("cwd".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    host_mod.insert("cwd".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "host.cwd".into(),
-        func: |_, _| Value::String(std::env::current_dir().unwrap().to_string_lossy().into())
+        func: |_, _| Value::String(std::env::current_dir().unwrap().to_string_lossy().to_string()),
     })));
-    host_mod.insert("pid".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    host_mod.insert("pid".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "host.pid".into(),
-        func: |_, _| Value::Number(std::process::id() as f64)
+        func: |_, _| Value::Number(std::process::id() as f64),
     })));
-    host_mod.insert("isRoot".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    host_mod.insert("isRoot".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "host.isRoot".into(),
-        func: |_, _| Value::Void
-    })));
-    host_mod.insert("signal".into(), Value::Task(Arc::new(hal::TaskValue::Native {
-        name: "host.signal".into(),
-        func: |args, _| {
-            if let Some(arg0) = args.get(0) { println!("[SIGNAL] {}", val_to_string(arg0)); }
-            Value::Void
-        }
+        func: |_, _| Value::Void,
     })));
     runner.register_module("host", host_mod);
 
     let mut fs_mod = HashMap::new();
-    fs_mod.insert("exists".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    fs_mod.insert("exists".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "fs.exists".into(),
         func: |args, _| {
-            if let Some(Value::String(p)) = args.get(0) {
-                if Path::new(p).exists() { return Value::Number(1.0); }
-            }
-            Value::Void
-        }
+            let path = if let Some(Value::String(s)) = args.get(0) { s } else { return Value::Void; };
+            if Path::new(path).exists() { Value::Number(1.0) } else { Value::Void }
+        },
     })));
-    fs_mod.insert("read".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    fs_mod.insert("read".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "fs.read".into(),
         func: |args, _| {
-            if let Some(Value::String(p)) = args.get(0) {
-                if let Ok(s) = std::fs::read_to_string(p) { return Value::String(s); }
-            }
-            Value::Void
-        }
+            let path = if let Some(Value::String(s)) = args.get(0) { s } else { return Value::Void; };
+            fs::read_to_string(path).map(Value::String).unwrap_or(Value::Void)
+        },
     })));
-    fs_mod.insert("write".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    fs_mod.insert("write".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "fs.write".into(),
         func: |args, _| {
-            if let (Some(Value::String(p)), Some(Value::String(c))) = (args.get(0), args.get(1)) {
-                if std::fs::write(p, c).is_ok() { return Value::Number(1.0); }
-            }
-            Value::Void
-        }
+            let path = if let Some(Value::String(s)) = args.get(0) { s } else { return Value::Void; };
+            let content = if let Some(Value::String(s)) = args.get(1) { s } else { return Value::Void; };
+            if fs::write(path, content).is_ok() { Value::Number(1.0) } else { Value::Void }
+        },
     })));
-    fs_mod.insert("deleteFile".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    fs_mod.insert("deleteFile".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "fs.deleteFile".into(),
         func: |args, _| {
-            if let Some(Value::String(p)) = args.get(0) {
-                if std::fs::remove_file(p).is_ok() { return Value::Number(1.0); }
-            }
-            Value::Void
-        }
+            let path = if let Some(Value::String(s)) = args.get(0) { s } else { return Value::Void; };
+            if fs::remove_file(path).is_ok() { Value::Number(1.0) } else { Value::Void }
+        },
     })));
-    fs_mod.insert("stat".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    fs_mod.insert("stat".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "fs.stat".into(),
         func: |args, _| {
-            if let Some(Value::String(p)) = args.get(0) {
-                if let Ok(m) = std::fs::metadata(p) {
-                    let mut map = HashMap::new();
-                    map.insert("size".into(), Value::Number(m.len() as f64));
-                    map.insert("mtime".into(), Value::Number(m.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as f64));
-                    map.insert("isDir".into(), if m.is_dir() { Value::Number(1.0) } else { Value::Void });
-                    return Value::Object(Arc::new(RefCell::new(map)));
-                }
-            }
-            Value::Void
-        }
+            let path = if let Some(Value::String(s)) = args.get(0) { s } else { return Value::Void; };
+            if let Ok(m) = fs::metadata(path) {
+                let mut map = HashMap::new();
+                map.insert("size".into(), Value::Number(m.len() as f64));
+                map.insert("mtime".into(), Value::Number(m.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as f64));
+                map.insert("isDir".into(), if m.is_dir() { Value::Number(1.0) } else { Value::Void });
+                Value::Object(Arc::new(RefCell::new(map)))
+            } else { Value::Void }
+        },
     })));
     runner.register_module("fs", fs_mod);
 
     let mut proc_mod = HashMap::new();
-    proc_mod.insert("run".into(), Value::Task(Arc::new(hal::TaskValue::Native {
+    proc_mod.insert("run".into(), Value::Task(Arc::new(hank::types::TaskValue::Native {
         name: "proc.run".into(),
         func: |args, _| {
-            if let Some(Value::String(cmd)) = args.get(0) {
-                let mut c = std::process::Command::new(cmd);
-                if let Some(Value::Array(as_)) = args.get(1) {
-                    for a in as_.borrow().iter() { c.arg(val_to_string(a)); }
-                }
-                if let Ok(out) = c.output() {
-                    let mut map = HashMap::new();
-                    map.insert("code".into(), Value::Number(out.status.code().unwrap_or(0) as f64));
-                    map.insert("stdout".into(), Value::String(String::from_utf8_lossy(&out.stdout).into()));
-                    map.insert("stderr".into(), Value::String(String::from_utf8_lossy(&out.stderr).into()));
-                    return Value::Object(Arc::new(RefCell::new(map)));
+            let cmd_name = if let Some(Value::String(s)) = args.get(0) { s } else { return Value::Void; };
+            let mut cmd = std::process::Command::new(cmd_name);
+            if let Some(Value::Array(a)) = args.get(1) {
+                for arg in a.borrow().iter() {
+                    match arg {
+                        Value::String(s) => { cmd.arg(s); },
+                        Value::Number(n) => { cmd.arg(n.to_string()); },
+                        _ => {}
+                    }
                 }
             }
-            Value::Void
-        }
+            if let Ok(output) = cmd.output() {
+                let mut map = HashMap::new();
+                map.insert("code".into(), Value::Number(output.status.code().unwrap_or(0) as f64));
+                map.insert("stdout".into(), Value::String(String::from_utf8_lossy(&output.stdout).to_string()));
+                map.insert("stderr".into(), Value::String(String::from_utf8_lossy(&output.stderr).to_string()));
+                Value::Object(Arc::new(RefCell::new(map)))
+            } else { Value::Void }
+        },
     })));
     runner.register_module("proc", proc_mod);
 }
 
-fn val_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Void => "null".into(),
-        Value::Array(_) => "[Array]".into(),
-        Value::Object(_) => "{Object}".into(),
-        Value::Opaque(ov) => format!("[Opaque:{}]", ov.label),
-        Value::Task(_) => "[Task]".into(),
-    }
-}
-
-fn run_conformance(workspace_root: &Path) {
+fn run_conformance(root: &Path) {
     let tests = [
-        "test/conformance/01_literals.hal",
-        "test/conformance/02_gates.hal",
-        "test/conformance/03_scoping.hal",
-        "test/conformance/04_hoisting.hal",
-        "test/conformance/05_params.hal",
-        "test/conformance/06_macros.hal",
-        "test/conformance/07_returns.hal",
-        "test/conformance/08_host_args.hal",
-        "test/conformance/09_deep_nesting.hal",
-        "test/conformance/10_edge_cases.hal",
-        "test/conformance/11_regex_parse.hal",
-        "test/conformance/12_data_advanced.hal",
-        "test/conformance/13_logic_module.hal",
-        "test/conformance/14_syslib_hank.hal",
+        "test/conformance/01_literals.hank",
+        "test/conformance/02_gates.hank",
+        "test/conformance/03_scoping.hank",
+        "test/conformance/04_hoisting.hank",
+        "test/conformance/05_params.hank",
+        "test/conformance/06_macros.hank",
+        "test/conformance/07_returns.hank",
+        "test/conformance/08_host_args.hank",
+        "test/conformance/09_deep_nesting.hank",
+        "test/conformance/10_edge_cases.hank",
+        "test/conformance/11_regex_parse.hank",
+        "test/conformance/12_data_advanced.hank",
+        "test/conformance/13_logic_module.hank",
+        "test/conformance/14_syslib_hank.hank",
+        "test/conformance/15_logic_eq.hank",
+        "test/conformance/16_chained_assign.hank",
+        "test/conformance/17_num_module.hank",
     ];
 
-    for t in tests {
+    for t in &tests {
         println!("--- Running: {} ---", t);
-        let mut runner = create_runner();
-        let path = workspace_root.join(t);
-        let args = if t.ends_with("08_host_args.hal") { vec![Value::String("Tamas".into())] } else { vec![] };
-        match runner.run(&path.to_string_lossy(), args) {
-            Ok(_) => {},
-            Err(e) => println!("Test Failed: {}", e),
+        let runner = create_runner();
+        let path = root.join(t);
+        let abs_path = match fs::canonicalize(&path) {
+            Ok(p) => p,
+            Err(_) => { println!("Test not found: {}", path.display()); continue; }
+        };
+        let res = Arc::new(FileResource::new(abs_path.to_string_lossy().to_string()));
+        
+        let mut args = vec![];
+        if t.ends_with("08_host_args.hank") {
+            args.push(Value::String("Tamas".into()));
+        }
+
+        if let Err(e) = runner.run(res, args) {
+            println!("Test Failed: {}", e);
         }
         println!("--------------------\n");
     }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-hal = { path = "../../" }
+hank = { path = "../../" }
 regex = "1.10"
 regex-lite = "0.1"
 serde = { version = "1.0", features = ["derive"] }

@@ -1,38 +1,25 @@
-use crate::types::{Value, Scope, Expr, Arc};
+use crate::types::{Value, Scope, Expr, Arc, Resource};
 use crate::lexer::{Lexer, Token};
 use crate::parser::Parser;
 use crate::interpreter::{Interpreter, EvalResult, HankScope};
 use std::collections::HashMap;
 use std::cell::RefCell;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub type ReadFileFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
-#[cfg(target_arch = "wasm32")]
-pub type ReadFileFn = Arc<dyn Fn(&str) -> Result<String, String>>;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub type ResolvePathFn = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
-#[cfg(target_arch = "wasm32")]
-pub type ResolvePathFn = Arc<dyn Fn(&str, &str) -> Result<String, String>>;
-
+/**
+ * A Hank Host Runner.
+ * Handles resource orchestration, macro resolution, and AST caching.
+ * Platform-agnostic: uses the Resource model for all content retrieval.
+ */
 pub struct Runner {
-    path_cache: HashMap<String, String>,
-    ast_cache: HashMap<String, Expr>,
-    macro_map: HashMap<String, String>,
+    resource_cache: RefCell<HashMap<String, Arc<dyn Resource>>>,
     pub core_scope: Arc<dyn Scope>,
-    read_file: ReadFileFn,
-    resolve_path: ResolvePathFn,
 }
 
 impl Runner {
-    pub fn new(read_file: ReadFileFn, resolve_path: ResolvePathFn) -> Self {
+    pub fn new() -> Self {
         Self {
-            path_cache: HashMap::new(),
-            ast_cache: HashMap::new(),
-            macro_map: HashMap::new(),
+            resource_cache: RefCell::new(HashMap::new()),
             core_scope: Arc::new(HankScope::new()),
-            read_file,
-            resolve_path,
         }
     }
 
@@ -40,35 +27,77 @@ impl Runner {
         self.core_scope.set(name, Value::Object(Arc::new(RefCell::new(tasks))));
     }
 
-    pub fn load(&mut self, script_path: &str) -> Result<String, String> {
-        let abs_path = (self.resolve_path)(script_path, "")?;
-        if self.ast_cache.contains_key(&abs_path) { return Ok(abs_path); }
-
-        self.preprocess(&abs_path, &mut vec![])?;
-
-        let content = self.path_cache.get(&abs_path).ok_or_else(|| format!("File not loaded: {}", abs_path))?;
-        let mut lexer = Lexer::new(content);
-        let tokens = lexer.tokenize();
-        let mut parser = Parser::new(tokens, abs_path.clone(), self.macro_map.clone());
-        let ast = parser.parse().map_err(|e| e.to_string())?;
-
-        self.ast_cache.insert(abs_path.clone(), ast);
-        Ok(abs_path)
-    }
-
-    pub fn unload(&mut self, script_path: &str) {
-        if let Ok(abs_path) = (self.resolve_path)(script_path, "") {
-            self.ast_cache.remove(&abs_path);
-            self.path_cache.remove(&abs_path);
+    /**
+     * Pre-loads and caches a resource for execution.
+     */
+    pub fn load(&self, resource: Arc<dyn Resource>, stack: Arc<RefCell<Vec<String>>>) -> Result<Expr, String> {
+        // Check cache
+        if let Some(cached) = self.resource_cache.borrow().get(resource.id()) {
+            if let Some(ast) = cached.ast() {
+                return Ok(ast);
+            }
         }
+
+        // Circular Dependency Check
+        if stack.borrow().contains(&resource.id().to_string()) {
+            return Err(format!("Circular Dependency: {}", resource.id()));
+        }
+
+        // Reconcile with cache
+        let active_resource = {
+            let mut cache = self.resource_cache.borrow_mut();
+            if !cache.contains_key(resource.id()) {
+                cache.insert(resource.id().to_string(), resource.clone());
+                resource
+            } else {
+                cache.get(resource.id()).unwrap().clone()
+            }
+        };
+
+        active_resource.load()?;
+        let content = active_resource.content().ok_or_else(|| format!("Resource content not loaded: {}", active_resource.id()))?;
+
+        stack.borrow_mut().push(active_resource.id().to_string());
+
+        let mut lexer = Lexer::new(&content);
+        let tokens = lexer.tokenize();
+        
+        let active_resource_inner = active_resource.clone();
+        // This is the tricky part in Rust. We need a way to call load recursively.
+        // We can use a reference to self if Parser doesn't require 'static.
+        // But Parser stores the closure.
+        // Let's use a trick: we'll use a Weak reference to the Runner or similar if needed,
+        // or just accept that we need to pass a context.
+        // Actually, we can use a "recursive resolver" closure that captures a reference to self.
+        
+        let runner_ptr: *const Runner = self;
+        let stack_inner = stack.clone();
+
+        let mut parser = Parser::new(tokens, active_resource.id().to_string(), Box::new(move |macro_path| {
+            let m_res = active_resource_inner.resolve(&macro_path)?;
+            // SAFETY: We know the Runner exists because we are running inside its run/load method.
+            unsafe {
+                (*runner_ptr).load(m_res.into(), stack_inner.clone())
+            }
+        }));
+
+        let ast = parser.parse().map_err(|e| e.to_string())?;
+        active_resource.set_ast(ast.clone());
+        
+        stack.borrow_mut().pop();
+        Ok(ast)
     }
 
-    pub fn run(&mut self, script_path: &str, args: Vec<Value>) -> Result<Value, String> {
-        let abs_path = self.load(script_path)?;
-        let ast = self.ast_cache.get(&abs_path).unwrap();
+    pub fn unload(&self, resource: &dyn Resource) {
+        self.resource_cache.borrow_mut().remove(resource.id());
+    }
+
+    pub fn run(&self, resource: Arc<dyn Resource>, args: Vec<Value>) -> Result<Value, String> {
+        let stack = Arc::new(RefCell::new(vec![]));
+        let ast = self.load(resource, stack)?;
 
         let mut interp = Interpreter::new(None, self.core_scope.clone());
-        let script_task = match interp.run(ast) {
+        let script_task = match interp.run(&ast) {
             Value::Task(t) => t,
             _ => return Err("Script did not evaluate to a Task definition.".into()),
         };
@@ -77,41 +106,5 @@ impl Runner {
             EvalResult::Value(v) | EvalResult::Return(v) => Ok(v),
             EvalResult::Error(e) => Err(e),
         }
-    }
-
-    fn preprocess(&mut self, path: &str, stack: &mut Vec<String>) -> Result<(), String> {
-        if stack.contains(&path.to_string()) { return Err(format!("Circular Dependency: {}", path)); }
-        if self.path_cache.contains_key(path) { return Ok(()); }
-
-        let content = (self.read_file)(path)?;
-        self.path_cache.insert(path.to_string(), content.clone());
-        
-        stack.push(path.to_string());
-        let macros = self.scan_macros(&content);
-        for m in macros {
-            let m_path = (self.resolve_path)(&m, path)?;
-            self.preprocess(&m_path, stack)?;
-            self.macro_map.insert(m, self.path_cache.get(&m_path).unwrap().clone());
-        }
-        stack.pop();
-        Ok(())
-    }
-
-    fn scan_macros(&self, content: &str) -> Vec<String> {
-        let mut lexer = Lexer::new(content);
-        let tokens = lexer.tokenize();
-        let mut macros = vec![];
-        for i in 0..tokens.len().saturating_sub(1) {
-            if matches!(tokens[i].0, Token::At) {
-                let next = &tokens[i+1].0;
-                match next {
-                    Token::String(s) | Token::Identifier(s) => {
-                        macros.push(s.clone());
-                    },
-                    _ => {}
-                }
-            }
-        }
-        macros
     }
 }

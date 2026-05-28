@@ -2,20 +2,22 @@ use crate::types::{Expr, Value, TokenData, Param, ValueType, OpaqueValue};
 use crate::lexer::{Token};
 use std::collections::HashMap;
 
+pub type MacroResolver = Box<dyn Fn(String) -> Result<Expr, String>>;
+
 pub struct Parser {
     tokens: Vec<(Token, TokenData)>,
     pos: usize,
     filename: String,
-    macro_map: HashMap<String, String>,
+    macro_resolver: MacroResolver,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<(Token, TokenData)>, filename: String, macro_map: HashMap<String, String>) -> Self {
+    pub fn new(tokens: Vec<(Token, TokenData)>, filename: String, macro_resolver: MacroResolver) -> Self {
         Self {
             tokens,
             pos: 0,
             filename,
-            macro_map,
+            macro_resolver,
         }
     }
 
@@ -56,7 +58,7 @@ impl Parser {
             Expr::Block(_, td) | Expr::Assign(_, _, td) | Expr::Literal(_, td) | 
             Expr::Ident(_, _, td) | Expr::Field(_, _, td) | Expr::FuncDef(_, _, td) | 
             Expr::FuncCall(_, _, td) | Expr::UnOp(_, _, td) | Expr::Object(_, td) | 
-            Expr::Array(_, td) | Expr::FlowControl(_, _, _, _, _, td) => td.clone(),
+            Expr::Array(_, td) | Expr::FlowControl { token: td, .. } => td.clone(),
         };
         Ok(Expr::Block(stmts, td_root))
     }
@@ -336,15 +338,9 @@ impl Parser {
             _ => return Err(self.error("Syntax Error: The '@' macro strictly requires a string literal path (e.g., @ \"utils\"). Identifier shorthand is not allowed.")),
         };
 
-        let content = self.macro_map.get(&raw_path).ok_or_else(|| self.error(&format!("Macro resource not found: @{}", raw_path)))?;
+        let task_ast = (self.macro_resolver)(raw_path.clone())?;
         let task_name = std::path::Path::new(&raw_path).file_stem().unwrap().to_string_lossy().to_string();
 
-        let mut lexer = crate::lexer::Lexer::new(content);
-        let tokens = lexer.tokenize();
-        let mut sub_parser = Parser::new(tokens, raw_path.clone(), self.macro_map.clone());
-        
-        let task_ast = sub_parser.parse()?;
-        
         Ok(Expr::Assign(task_name, Box::new(task_ast), td))
     }
 
