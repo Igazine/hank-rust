@@ -1,8 +1,8 @@
 # Hank for Rust
 
-A Rust implementation of the Hank language.
+Hank is a purely symbolic, instruction-oriented embeddable language designed to bring secure, dynamic automation to any host application. Built on a strict air-gapped execution model, Hank has zero built-in I/O, guaranteeing that scripts cannot access the filesystem, network, or OS without explicit delegation. This makes it the perfect predictable environment for game scripting, microservice orchestration, and user-facing plugin systems. With a highly readable, keyword-less syntax and universal cross-platform parity, Hank seamlessly bridges the gap between static configuration files and complex general-purpose programming.
 
-This repository provides a high-performance, memory-safe Rust library (`hank`) for embedding the Hank interpreter into any Rust application.
+This repository provides the official Rust implementation of the Hank language. It is a high-performance, memory-safe library (`hank`) for embedding the Hank interpreter into any Rust application.
 
 ## Installation
 

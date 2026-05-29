@@ -2,6 +2,9 @@
 name = "hank"
 version = "1.3.0"
 edition = "2021"
+description = "A purely symbolic, embeddable language designed for secure orchestration and automation. It provides an air-gapped environment perfect for plugin systems and API interfaces, replacing static configuration with predictable, keyword-less logic."
+license = "MIT"
+repository = "https://github.com/Igazine/hank-rust"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
