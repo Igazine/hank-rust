@@ -62,6 +62,10 @@ impl Resource for FileResource {
             }
         }
 
+        if !path.exists() {
+             return Err(format!("Path not found: {}", path.display()));
+        }
+
         let abs_path = fs::canonicalize(path).map_err(|e| e.to_string())?;
         Ok(Box::new(FileResource::new(abs_path.to_string_lossy().to_string())))
     }
@@ -108,6 +112,13 @@ fn main() {
 fn create_runner() -> Runner {
     let runner = Runner::new();
 
+    // 0. Localization
+    let mut loc = HashMap::new();
+    loc.insert(4001, "Target is not a function: {0}".into());
+    loc.insert(4007, "Type Mismatch: Expected {0}, got {1} in {2}".into());
+    loc.insert(4005, "Value exceeds safe integer bounds: {0} in {1}".into());
+    runner.register_localization(loc);
+
     // Register Extensions (Batteries included, but disconnected)
     runner.register_extension(Box::new(stdlib::StdLib));
     runner.register_extension(Box::new(PlatformExtension));
@@ -131,10 +142,11 @@ fn run_conformance(root: &Path) {
         "test/conformance/11_regex_parse.hank",
         "test/conformance/12_data_advanced.hank",
         "test/conformance/13_logic_module.hank",
-        // "test/conformance/14_syslib_hank.hank", // MOVED to extensions
         "test/conformance/15_logic_eq.hank",
         "test/conformance/16_chained_assign.hank",
         "test/conformance/17_num_module.hank",
+        "test/conformance/18_runtime_module.hank",
+        "test/conformance/19_error_handling.hank",
     ];
 
     for t in &tests {

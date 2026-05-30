@@ -1,4 +1,4 @@
-use crate::types::{Expr, Value, TaskValue, ExecutionContext, Scope, Arc, HankError, HankErrorValue, EvalResult};
+use crate::types::{Expr, Value, TaskValue, ExecutionContext, Scope, Arc, HankError, HankErrorValue, EvalResult, ValueType, ErrorValue, OpaqueValue};
 use crate::error_registry::HankErrorRegistry;
 use std::collections::HashMap;
 use std::cell::RefCell;
@@ -6,6 +6,7 @@ use std::cell::RefCell;
 pub struct Interpreter {
     pub global_scope: Arc<dyn Scope>,
     pub core_scope: Arc<dyn Scope>,
+    pub localization: HashMap<i32, String>,
     _depth: usize,
 }
 
@@ -46,18 +47,19 @@ impl Scope for HankScope {
 }
 
 impl Interpreter {
-    pub fn new(parent_scope: Option<Arc<dyn Scope>>, core_scope: Arc<dyn Scope>) -> Self {
+    pub fn new(parent_scope: Option<Arc<dyn Scope>>, core_scope: Arc<dyn Scope>, localization: HashMap<i32, String>) -> Self {
         let global = parent_scope.unwrap_or_else(|| Arc::new(HankScope {
             values: RefCell::new(HashMap::new()),
             parent: Some(core_scope.clone()),
         }));
-        Self { global_scope: global, core_scope, _depth: 0 }
+        Self { global_scope: global, core_scope, localization, _depth: 0 }
     }
 
     pub fn run(&mut self, expr: &Expr) -> Value {
-        match self.eval(expr, &self.global_scope) {
+        match self.eval_in_scope(expr, &self.global_scope) {
             EvalResult::Value(v) | EvalResult::Return(v) => v,
-            EvalResult::Error(e) => { eprintln!("Runtime Error: {}", e.message); Value::Void }
+            EvalResult::Break => Value::Void,
+            EvalResult::Error(v) => v
         }
     }
 
@@ -65,17 +67,56 @@ impl Interpreter {
         !matches!(v, Value::Void)
     }
 
-    pub fn eval(&self, expr: &Expr, scope: &Arc<dyn Scope>) -> EvalResult {
+    pub fn is_error(&self, v: &Value) -> bool {
+        matches!(v, Value::Error(_))
+    }
+
+    pub fn eval(&self, expr: &Expr, scope: &Arc<dyn Scope>) -> Value {
+        match self.eval_in_scope(expr, scope) {
+            EvalResult::Value(v) | EvalResult::Return(v) => v,
+            EvalResult::Break => Value::Opaque(Arc::new(OpaqueValue { label: "__ControlFlow".into(), data: Box::new("Break".to_string()) })),
+            EvalResult::Error(v) => v
+        }
+    }
+
+    fn eval_in_scope(&self, expr: &Expr, scope: &Arc<dyn Scope>) -> EvalResult {
         const MAX_DEPTH: usize = 1000;
         if self._depth > MAX_DEPTH {
-            return EvalResult::Error(HankErrorRegistry::create(HankError::GenericRuntimeError, vec!["Stack overflow".into()], None, None, None));
+            return EvalResult::Error(Value::Error(Arc::new(ErrorValue { code: HankError::GenericRuntimeError, args: vec![Value::String("Stack overflow".into())] })));
         }
 
         match expr {
             Expr::Block(stmts, _) => {
+                // --- TASK HOISTING PASS ---
+                for stmt in stmts {
+                    if let Expr::Assign(name, val_expr, _) = stmt {
+                        if let Expr::FuncDef(_, _, _) = &**val_expr {
+                            if let EvalResult::Value(v) = self.eval_in_scope(val_expr, scope) {
+                                scope.set(name, v);
+                            }
+                        }
+                        // Nested macro hoisting
+                        if let Expr::Assign(inner_name, inner_val, _) = &**val_expr {
+                            if let Expr::FuncDef(_, _, _) = &**inner_val {
+                                if let EvalResult::Value(v) = self.eval_in_scope(inner_val, scope) {
+                                    scope.set(inner_name, v);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let mut last = Value::Void;
                 for stmt in stmts {
-                    match self.eval(stmt, scope) {
+                    // Skip already hoisted tasks
+                    if let Expr::Assign(_, val_expr, _) = stmt {
+                        if let Expr::FuncDef(_, _, _) = &**val_expr { continue; }
+                        if let Expr::Assign(_, inner_val, _) = &**val_expr {
+                            if let Expr::FuncDef(_, _, _) = &**inner_val { continue; }
+                        }
+                    }
+
+                    match self.eval_in_scope(stmt, scope) {
                         EvalResult::Value(v) => last = v,
                         other => return other,
                     }
@@ -83,19 +124,22 @@ impl Interpreter {
                 EvalResult::Value(last)
             },
             Expr::Assign(name, val_expr, _) => {
-                match self.eval(val_expr, scope) {
+                match self.eval_in_scope(val_expr, scope) {
                     EvalResult::Value(v) => { scope.set(name, v.clone()); EvalResult::Value(v) },
                     other => other,
                 }
             },
             Expr::Literal(val, _) => EvalResult::Value(val.clone()),
             Expr::Ident(name, is_core, _) => {
-                let val = if *is_core { self.core_scope.get(name) } else { scope.get(name) };
+                let val = if *is_core { self.core_scope.get(name) } else { 
+                    let v = scope.get(name);
+                    if v.get_type() == ValueType::Void { self.core_scope.get(name) } else { v }
+                };
                 EvalResult::Value(val)
             },
-            Expr::Field(obj_expr, field_name, _) => {
-                match self.eval(obj_expr, scope) {
-                    EvalResult::Value(Value::Object(map)) => {
+            Expr::Field(coll_expr, field_name, _) => {
+                match self.eval_in_scope(coll_expr, scope) {
+                    EvalResult::Value(Value::Map(map)) => {
                         EvalResult::Value(map.borrow().get(field_name).cloned().unwrap_or(Value::Void))
                     },
                     EvalResult::Value(Value::Array(vec)) if field_name == "length" => {
@@ -117,11 +161,11 @@ impl Interpreter {
                 })))
             },
             Expr::FuncCall(target_expr, arg_exprs, _) => {
-                match self.eval(target_expr, scope) {
+                match self.eval_in_scope(target_expr, scope) {
                     EvalResult::Value(target) => {
                         let mut args = Vec::new();
                         for arg_expr in arg_exprs {
-                            match self.eval(arg_expr, scope) {
+                            match self.eval_in_scope(arg_expr, scope) {
                                 EvalResult::Value(v) => args.push(v),
                                 other => return other,
                             }
@@ -132,7 +176,7 @@ impl Interpreter {
                 }
             },
             Expr::UnOp(op, target, _) => {
-                match self.eval(target, scope) {
+                match self.eval_in_scope(target, scope) {
                     EvalResult::Value(val) => {
                         match op.as_str() {
                             "!" => EvalResult::Value(if self.is_truthy(&val) { Value::Void } else { Value::Number(1.0) }),
@@ -144,54 +188,58 @@ impl Interpreter {
                     other => other,
                 }
             },
-            Expr::Object(fields, _) => {
+            Expr::Map(fields, _) => {
                 let mut map = HashMap::new();
                 for (k, v_expr) in fields {
-                    match self.eval(v_expr, scope) {
+                    match self.eval_in_scope(v_expr, scope) {
                         EvalResult::Value(v) => { map.insert(k.clone(), v); },
                         other => return other,
                     }
                 }
-                EvalResult::Value(Value::Object(Arc::new(RefCell::new(map))))
+                EvalResult::Value(Value::Map(Arc::new(RefCell::new(map))))
             },
             Expr::Array(items, _) => {
                 let mut vec = Vec::new();
                 for item_expr in items {
-                    match self.eval(item_expr, scope) {
+                    match self.eval_in_scope(item_expr, scope) {
                         EvalResult::Value(v) => vec.push(v),
                         other => return other,
                     }
                 }
                 EvalResult::Value(Value::Array(Arc::new(RefCell::new(vec))))
             },
+            Expr::Error(code, arg_exprs, _) => {
+                let mut args = Vec::new();
+                for arg_expr in arg_exprs {
+                    match self.eval_in_scope(arg_expr, scope) {
+                        EvalResult::Value(v) => args.push(v),
+                        other => return other,
+                    }
+                }
+                EvalResult::Value(Value::Error(Arc::new(ErrorValue { code: *code, args })))
+            },
             Expr::FlowControl { condition, success, fallback, rescue, catch_var, .. } => {
-                match self.eval(condition, scope) {
+                let cond_res = self.eval_in_scope(condition, scope);
+                let branch_res = match cond_res {
                     EvalResult::Value(cond_val) => {
-                        let res = if self.is_truthy(&cond_val) {
-                            self.eval(success, scope)
+                        if self.is_truthy(&cond_val) {
+                            self.eval_in_scope(success, scope)
                         } else if let Some(fb) = fallback {
-                            self.eval(fb, scope)
-                        } else { EvalResult::Value(Value::Void) };
-
-                        if let EvalResult::Error(err) = res {
-                            if let Some(rescue_block) = rescue {
-                                let rescue_scope: Arc<dyn Scope> = Arc::new(HankScope {
-                                    values: RefCell::new(HashMap::new()),
-                                    parent: Some(scope.clone()),
-                                });
-                                if let Some(var) = catch_var { rescue_scope.set(var, Value::String(err.message.clone())); }
-                                self.eval(rescue_block, &rescue_scope)
-                            } else { EvalResult::Error(err) }
-                        } else { res }
+                            self.eval_in_scope(fb, scope)
+                        } else { EvalResult::Value(Value::Void) }
                     },
-                    EvalResult::Error(err) if rescue.is_some() => {
+                    other => other,
+                };
+
+                match branch_res {
+                    EvalResult::Error(err_val) if rescue.is_some() => {
                         let rescue_block = rescue.as_ref().unwrap();
                         let rescue_scope: Arc<dyn Scope> = Arc::new(HankScope {
                             values: RefCell::new(HashMap::new()),
                             parent: Some(scope.clone()),
                         });
-                        if let Some(var) = catch_var { rescue_scope.set(var, Value::String(err.message.clone())); }
-                        self.eval(rescue_block, &rescue_scope)
+                        if let Some(var) = catch_var { rescue_scope.set(var, err_val); }
+                        self.eval_in_scope(rescue_block, &rescue_scope)
                     },
                     other => other,
                 }
@@ -204,11 +252,17 @@ impl Interpreter {
             match &**tv {
                 TaskValue::Native { func, .. } => {
                     let ctx = HankExecutionContext { interp: self, scope: scope.clone() };
-                    func(args, &ctx)
+                    let res = func(args, &ctx);
+                    match res {
+                        EvalResult::Value(Value::Opaque(op)) if op.label == "__ControlFlow" && op.data.downcast_ref::<String>().map(|s| s == "Break").unwrap_or(false) => {
+                            EvalResult::Break
+                        },
+                        _ => res
+                    }
                 },
                 TaskValue::User { params, body, closure, .. } => {
                     if args.len() > params.len() {
-                        return EvalResult::Error(HankErrorRegistry::create(HankError::TooManyArguments, vec![], None, None, None));
+                        return EvalResult::Error(Value::Error(Arc::new(ErrorValue { code: HankError::TooManyArguments, args: vec![] })));
                     }
                     let task_scope: Arc<dyn Scope> = Arc::new(HankScope {
                         values: RefCell::new(HashMap::new()),
@@ -217,25 +271,28 @@ impl Interpreter {
                     for (i, p) in params.iter().enumerate() {
                         let val = if i < args.len() { args[i].clone() }
                         else if let Some(def_expr) = &p.default_value {
-                            match self.eval(def_expr, &task_scope) {
+                            match self.eval_in_scope(def_expr, &task_scope) {
                                 EvalResult::Value(v) => v,
                                 other => return other,
                             }
                         }
                         else if p.is_optional { Value::Void }
                         else {
-                            return EvalResult::Error(HankErrorRegistry::create(HankError::MissingRequiredParameter, vec![p.name.clone()], None, None, None));
+                            return EvalResult::Error(Value::Error(Arc::new(ErrorValue { code: HankError::MissingRequiredParameter, args: vec![Value::String(p.name.clone())] })));
                         };
                         task_scope.set(&p.name, val);
                     }
-                    match self.eval(body, &task_scope) {
-                        EvalResult::Return(v) | EvalResult::Value(v) => EvalResult::Value(v),
-                        EvalResult::Error(e) => EvalResult::Error(e),
+                    let res = self.eval_in_scope(body, &task_scope);
+                    match res {
+                        EvalResult::Return(v) | EvalResult::Value(v) => {
+                            if self.is_error(&v) { EvalResult::Error(v) } else { EvalResult::Value(v) }
+                        },
+                        other => other,
                     }
                 }
             }
         } else {
-            EvalResult::Error(HankErrorRegistry::create(HankError::TargetNotFunction, vec![format!("{:?}", task)], None, None, None))
+            EvalResult::Error(Value::Error(Arc::new(ErrorValue { code: HankError::TargetNotFunction, args: vec![Value::String(format!("{:?}", task))] })))
         }
     }
 }
@@ -249,15 +306,25 @@ impl<'a> ExecutionContext for HankExecutionContext<'a> {
     fn call(&self, task: &Value, args: Vec<Value>) -> Value {
         match self.interp.call(task, args, &self.scope) {
             EvalResult::Value(v) | EvalResult::Return(v) => v,
-            EvalResult::Error(_) => Value::Void,
+            EvalResult::Break => Value::Opaque(Arc::new(OpaqueValue { label: "__ControlFlow".into(), data: Box::new("Break".to_string()) })),
+            EvalResult::Error(v) => v,
         }
     }
 
     fn eval(&self, expr: &Expr) -> Value {
-        match self.interp.eval(expr, &self.scope) {
+        match self.interp.eval_in_scope(expr, &self.scope) {
             EvalResult::Value(v) | EvalResult::Return(v) => v,
-            EvalResult::Error(_) => Value::Void,
+            EvalResult::Break => Value::Opaque(Arc::new(OpaqueValue { label: "__ControlFlow".into(), data: Box::new("Break".to_string()) })),
+            EvalResult::Error(v) => v,
         }
+    }
+
+    fn is_error(&self, val: &Value) -> bool {
+        self.interp.is_error(val)
+    }
+
+    fn get_localization(&self) -> HashMap<i32, String> {
+        self.interp.localization.clone()
     }
 
     fn scope(&self) -> &Arc<dyn Scope> {

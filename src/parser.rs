@@ -55,13 +55,17 @@ impl Parser {
         if stmts.len() == 1 {
             return Ok(stmts.remove(0));
         }
-        let td_root = match &stmts[0] {
+        let td_root = self.get_td(&stmts[0]);
+        Ok(Expr::Block(stmts, td_root))
+    }
+
+    fn get_td(&self, expr: &Expr) -> TokenData {
+        match expr {
             Expr::Block(_, td) | Expr::Assign(_, _, td) | Expr::Literal(_, td) | 
             Expr::Ident(_, _, td) | Expr::Field(_, _, td) | Expr::FuncDef(_, _, td) | 
-            Expr::FuncCall(_, _, td) | Expr::UnOp(_, _, td) | Expr::Object(_, td) | 
-            Expr::Array(_, td) | Expr::FlowControl { token: td, .. } => td.clone(),
-        };
-        Ok(Expr::Block(stmts, td_root))
+            Expr::FuncCall(_, _, td) | Expr::UnOp(_, _, td) | Expr::Map(_, td) | 
+            Expr::Array(_, td) | Expr::FlowControl { token: td, .. } | Expr::Error(_, _, td) => td.clone(),
+        }
     }
 
     fn parse_statement(&mut self) -> Result<Expr, HankErrorValue> {
@@ -154,13 +158,9 @@ impl Parser {
                 }
             },
             Token::LBrace => {
-                if self.is_object_literal() {
-                    self.parse_object_literal()?
-                } else {
-                    self.parse_block()?
-                }
+                self.parse_block()?
             },
-            Token::LBracket => self.parse_array_literal()?,
+            Token::LBracket => self.parse_collection_literal()?,
             Token::Not => {
                 self.pos += 1;
                 Expr::UnOp("!".into(), Box::new(self.parse_primary()?), td)
@@ -265,45 +265,71 @@ impl Parser {
         Ok(Expr::Block(stmts, td))
     }
 
-    fn is_object_literal(&self) -> bool {
-        let mut p = self.pos + 1;
-        while p < self.tokens.len() && matches!(self.tokens[p].0, Token::Newline) { p += 1; }
-        if p >= self.tokens.len() { return false; }
-        if matches!(self.tokens[p].0, Token::RBrace) { return true; }
-        if let Token::Identifier(_) = &self.tokens[p].0 {
-            let mut next = p + 1;
-            while next < self.tokens.len() && matches!(self.tokens[next].0, Token::Newline) { next += 1; }
-            return next < self.tokens.len() && matches!(self.tokens[next].0, Token::Colon);
-        }
-        false
-    }
-
-    fn parse_object_literal(&mut self) -> Result<Expr, HankErrorValue> {
-        let td = self.consume(Token::LBrace)?;
-        let mut fields = HashMap::new();
-        while !matches!(self.peek(), Token::RBrace) && !self.is_eof() {
-            self.skip_newlines();
-            if matches!(self.peek(), Token::RBrace) { break; }
-            let key = self.consume_identifier()?;
-            self.consume(Token::Colon)?;
-            fields.insert(key, self.parse_expression()?);
-            if matches!(self.peek(), Token::Comma) { self.consume(Token::Comma)?; }
-        }
-        self.consume(Token::RBrace)?;
-        Ok(Expr::Object(fields, td))
-    }
-
-    fn parse_array_literal(&mut self) -> Result<Expr, HankErrorValue> {
+    fn parse_collection_literal(&mut self) -> Result<Expr, HankErrorValue> {
         let td = self.consume(Token::LBracket)?;
-        let mut items = vec![];
-        while !matches!(self.peek(), Token::RBracket) && !self.is_eof() {
-            self.skip_newlines();
-            if matches!(self.peek(), Token::RBracket) { break; }
-            items.push(self.parse_expression()?);
-            if matches!(self.peek(), Token::Comma) { self.consume(Token::Comma)?; }
+        self.skip_newlines();
+
+        // 1. Handle [:]
+        if matches!(self.peek(), Token::Colon) {
+            self.consume(Token::Colon)?;
+            self.consume(Token::RBracket)?;
+            return Ok(Expr::Map(HashMap::new(), td));
         }
-        self.consume(Token::RBracket)?;
-        Ok(Expr::Array(items, td))
+
+        // 2. Handle []
+        if matches!(self.peek(), Token::RBracket) {
+            self.consume(Token::RBracket)?;
+            return Ok(Expr::Array(vec![], td));
+        }
+
+        // 3. Parse first element
+        let first = self.parse_expression()?;
+        self.skip_newlines();
+
+        if matches!(self.peek(), Token::Colon) {
+            // This is a Map
+            self.consume(Token::Colon)?;
+            let val = self.parse_expression()?;
+            let mut fields = HashMap::new();
+            fields.insert(self.get_static_key(&first)?, val);
+
+            loop {
+                self.skip_newlines();
+                if matches!(self.peek(), Token::Comma) {
+                    self.consume(Token::Comma)?;
+                    self.skip_newlines();
+                    if matches!(self.peek(), Token::RBracket) { break; }
+                    let key_expr = self.parse_expression()?;
+                    self.consume(Token::Colon)?;
+                    let val_expr = self.parse_expression()?;
+                    fields.insert(self.get_static_key(&key_expr)?, val_expr);
+                } else { break; }
+            }
+            self.consume(Token::RBracket)?;
+            Ok(Expr::Map(fields, td))
+        } else {
+            // This is an Array
+            let mut items = vec![first];
+            loop {
+                self.skip_newlines();
+                if matches!(self.peek(), Token::Comma) {
+                    self.consume(Token::Comma)?;
+                    self.skip_newlines();
+                    if matches!(self.peek(), Token::RBracket) { break; }
+                    items.push(self.parse_expression()?);
+                } else { break; }
+            }
+            self.consume(Token::RBracket)?;
+            Ok(Expr::Array(items, td))
+        }
+    }
+
+    fn get_static_key(&self, e: &Expr) -> Result<String, HankErrorValue> {
+        match e {
+            Expr::Literal(Value::String(s), _) => Ok(s.clone()),
+            Expr::Ident(name, false, _) => Ok(name.clone()),
+            _ => Err(self.error(HankError::ExpectedIdentifier, vec![format!("{:?}", self.peek())])),
+        }
     }
 
     fn parse_arg_list(&mut self) -> Result<Vec<Expr>, HankErrorValue> {

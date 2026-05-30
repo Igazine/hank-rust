@@ -14,6 +14,7 @@ use std::cell::RefCell;
 pub struct Runner {
     resource_cache: RefCell<HashMap<String, Arc<dyn Resource>>>,
     pub core_scope: Arc<dyn Scope>,
+    pub localization: RefCell<HashMap<i32, String>>,
 }
 
 impl Runner {
@@ -21,6 +22,16 @@ impl Runner {
         Self {
             resource_cache: RefCell::new(HashMap::new()),
             core_scope: Arc::new(HankScope::new(None)),
+            localization: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /**
+     * Registers a localization map (Code -> Template).
+     */
+    pub fn register_localization(&self, map: HashMap<i32, String>) {
+        for (code, tmpl) in map {
+            self.localization.borrow_mut().insert(code, tmpl);
         }
     }
 
@@ -32,7 +43,7 @@ impl Runner {
                 func,
             })));
         }
-        self.core_scope.set(name, Value::Object(Arc::new(RefCell::new(module_obj))));
+        self.core_scope.set(name, Value::Map(Arc::new(RefCell::new(module_obj))));
     }
 
     pub fn register_extension(&self, ext: Box<dyn crate::types::HankExtension>) {
@@ -108,15 +119,28 @@ impl Runner {
         let stack = Arc::new(RefCell::new(vec![]));
         let ast = self.load(resource, stack)?;
 
-        let mut interp = Interpreter::new(None, self.core_scope.clone());
-        let script_task = match interp.run(&ast) {
-            Value::Task(t) => t,
-            _ => return Err(HankErrorRegistry::create(HankError::ScriptMustBeTask, vec![], None, None, None)),
-        };
+        let mut interp = Interpreter::new(None, self.core_scope.clone(), self.localization.borrow().clone());
+        let script_res = interp.run(&ast);
 
-        match interp.call(&Value::Task(script_task), args, &interp.global_scope) {
-            EvalResult::Value(v) | EvalResult::Return(v) => Ok(v),
-            EvalResult::Error(e) => Err(e),
+        if let Value::Task(script_task) = script_res {
+            match interp.call(&Value::Task(script_task), args, &interp.global_scope) {
+                EvalResult::Value(v) | EvalResult::Return(v) => Ok(v),
+                EvalResult::Break => Ok(Value::Void),
+                EvalResult::Error(v) => {
+                    // Convert native error back to Host error if it bubbled up to the runner
+                    if let Value::Error(e) = &v {
+                        let mut msg = self.localization.borrow().get(&(e.code as i32)).cloned().unwrap_or_else(|| "Uncaught Hank Error".into());
+                        // Simplistic formatting for runner-level exit
+                        Ok(v)
+                    } else {
+                        Ok(v)
+                    }
+                }
+            }
+        } else if let Value::Error(_) = script_res {
+            Ok(script_res)
+        } else {
+            Err(HankErrorRegistry::create(HankError::ScriptMustBeTask, vec![], None, None, None))
         }
     }
 }

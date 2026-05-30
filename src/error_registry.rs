@@ -28,6 +28,7 @@ impl HankErrorRegistry {
         m.insert(HankError::Halt, "HANK_HALT:{0}".into());
         m.insert(HankError::BitwiseOutOfBounds, "Value exceeds safe integer bounds for bitwise operation: {0}".into());
         m.insert(HankError::GenericRuntimeError, "{0}".into());
+        m.insert(HankError::TypeMismatch, "Type Mismatch: Expected {0}, got {1} in {2}".into());
         m
     }
 

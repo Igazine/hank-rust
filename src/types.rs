@@ -12,9 +12,10 @@ pub enum ValueType {
     Number,
     String,
     Array,
-    Object,
+    Map,
     Opaque,
     Task,
+    Error,
 }
 
 #[derive(Clone, Debug)]
@@ -23,9 +24,10 @@ pub enum Value {
     Number(f64),
     String(String),
     Array(Arc<RefCell<Vec<Value>>>),
-    Object(Arc<RefCell<HashMap<String, Value>>>),
+    Map(Arc<RefCell<HashMap<String, Value>>>),
     Opaque(Arc<OpaqueValue>),
     Task(Arc<TaskValue>),
+    Error(Arc<ErrorValue>),
 }
 
 impl Value {
@@ -35,9 +37,10 @@ impl Value {
             Self::Number(_) => ValueType::Number,
             Self::String(_) => ValueType::String,
             Self::Array(_) => ValueType::Array,
-            Self::Object(_) => ValueType::Object,
+            Self::Map(_) => ValueType::Map,
             Self::Opaque(_) => ValueType::Opaque,
             Self::Task(_) => ValueType::Task,
+            Self::Error(_) => ValueType::Error,
         }
     }
 }
@@ -46,6 +49,12 @@ impl Value {
 pub struct OpaqueValue {
     pub label: String,
     pub data: Box<dyn std::any::Any + Send + Sync>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ErrorValue {
+    pub code: HankError,
+    pub args: Vec<Value>,
 }
 
 pub enum TaskValue {
@@ -82,6 +91,8 @@ pub type NativeFunc = fn(args: Vec<Value>, ctx: &dyn ExecutionContext) -> EvalRe
 pub trait ExecutionContext {
     fn call(&self, task: &Value, args: Vec<Value>) -> Value;
     fn eval(&self, node: &Expr) -> Value;
+    fn is_error(&self, val: &Value) -> bool;
+    fn get_localization(&self) -> HashMap<i32, String>;
     fn scope(&self) -> &Arc<dyn Scope>;
 }
 
@@ -110,7 +121,7 @@ pub enum Expr {
     FuncDef(Vec<Param>, Box<Expr>, TokenData),
     FuncCall(Box<Expr>, Vec<Expr>, TokenData),
     UnOp(String, Box<Expr>, TokenData),
-    Object(HashMap<String, Expr>, TokenData),
+    Map(HashMap<String, Expr>, TokenData),
     Array(Vec<Expr>, TokenData),
     FlowControl {
         condition: Box<Expr>,
@@ -120,6 +131,7 @@ pub enum Expr {
         catch_var: Option<String>,
         token: TokenData,
     },
+    Error(HankError, Vec<Expr>, TokenData),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -165,6 +177,7 @@ pub enum HankError {
     Halt = 4004,
     BitwiseOutOfBounds = 4005,
     GenericRuntimeError = 4006,
+    TypeMismatch = 4007,
 }
 
 #[derive(Debug, Clone)]
@@ -185,5 +198,6 @@ impl std::error::Error for HankErrorValue {}
 pub enum EvalResult {
     Value(Value),
     Return(Value),
-    Error(HankErrorValue),
+    Break,
+    Error(Value), // Now Error is a Value (Type 8)
 }
